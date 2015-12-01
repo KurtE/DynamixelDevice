@@ -1,0 +1,32 @@
+#######################################
+# Syntax Coloring Map For DynamixelDevice
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+DynamixelDevice	KEYWORD1
+REG	KEYWORD2
+
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+init	KEYWORD2
+processInput	KEYWORD2
+
+setRX	KEYWORD2
+setTX	KEYWORD2
+transmitMessage	KEYWORD2
+postProcessRegisterWrite	KEYWORD2
+preProcessRegisterRead	KEYWORD2
+processSyncWrite	KEYWORD2
+lookAtOtherDevicePackets	KEYWORD2
+
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
