@@ -30,7 +30,11 @@
 // Defines
 //------------------------------------------------------------------------------
 
-//#define USE_DEBUG_PINS
+#define DDV_USE_DEBUG_PINS
+#define DDV_DEBUG_PIN1   9
+#define DDV_DEBUG_PIN2  10
+#define DDV_DEBUG_PIN3  11
+#define DDV_DEBUG_PIN4  12
 
 #ifndef LED_PIN
 #define LED_PIN 13
@@ -77,7 +81,6 @@ class RegWriteClass
 	public:
 		byte RegWriteLength;
 		byte RegWriteAddress;
-		byte RegWriteData[REG_COUNT];
 };
 
 //------------------------------------------------------------------------------
@@ -87,7 +90,7 @@ class RegWriteClass
 class DynamixelDevice
 {
   protected:
-  	bool Diode;
+  	bool diode_;
     int DecodeIndex;
     byte mID;
     byte mCount;
@@ -109,6 +112,7 @@ class DynamixelDevice
 
   public:
     byte REG[ REG_COUNT ];
+    byte RegWriteData[REG_COUNT];
 
     virtual int init( Stream* pStream, bool diode = false );
     void processInput( void );
@@ -122,6 +126,7 @@ class DynamixelDevice
     virtual bool postProcessRegisterWrite(int index, int len);
     virtual void preProcessRegisterRead(int index, int len);
     virtual void processSyncWrite(int index, int len, byte* data, int data_len );
+    virtual void processReset(void);
     virtual void lookAtOtherDevicePackets(int mID, byte instruction, byte* data, int len);
 };
 
@@ -130,14 +135,20 @@ class DynamixelDevice
 //------------------------------------------------------------------------------
 int DynamixelDevice::init( Stream* pStream, bool diode )
 {
-	Diode=diode;
+  diode_=diode;
   int ChkGood;
   unsigned short chk = 0;
   pstream_ = pStream;
   serial_in_input_mode_ = false;
   last_serial_input_time_ = millis();    // remember when we last received any input...
-  if(!Diode)setRX();  // start off in input mode.
-	regWriteCount=0;
+#ifdef DDV_USE_DEBUG_PINS 
+  pinMode(DDV_DEBUG_PIN1, OUTPUT);
+  pinMode(DDV_DEBUG_PIN2, OUTPUT);
+  pinMode(DDV_DEBUG_PIN3, OUTPUT);
+  pinMode(DDV_DEBUG_PIN4, OUTPUT);
+#endif  
+  setRX();  // start off in input mode.
+  regWriteCount=0;
  
   memset(REG, 0, sizeof(REG));    // clear out all registers to start
   for ( int i = 0; i < EEPROMREGLENGTH; ++i )
@@ -171,7 +182,7 @@ int DynamixelDevice::init( Stream* pStream, bool diode )
 
   //int baud = (2000000 / ( REG[ REG_BAUD ] + 1 ));
 	
-	if(!Diode)
+	if(!diode_)
 	{
 		  // If this is for a Teensy, then we need to configure the serial port
 		  #if defined(__MK20DX256__) || defined(__MKL26Z64__)
@@ -202,22 +213,21 @@ int DynamixelDevice::init( Stream* pStream, bool diode )
 void DynamixelDevice::processInput( void )
 {
   // Make sure we are in input mode
-  if(!Diode) setRX();
+  setRX();
   
   uint8_t first_char = 1;
 
-#ifdef USE_DEBUG_PINS 
-  pinMode(3, OUTPUT);
-  pinMode(4, OUTPUT);
-  pinMode(5, OUTPUT);
-#endif  
   int ichr;
+#ifdef DDV_USE_DEBUG_PINS 
+    digitalWrite(DDV_DEBUG_PIN4, !digitalRead(DDV_DEBUG_PIN4));
+#endif
   // loop while we have input available
   while ((ichr = pstream_->read()) != -1)
   {
-#ifdef USE_DEBUG_PINS 
-    digitalWrite(5, !digitalRead(5));
+#ifdef DDV_USE_DEBUG_PINS 
+    digitalWrite(DDV_DEBUG_PIN3, !digitalRead(DDV_DEBUG_PIN3));
 #endif
+    
     if (first_char)
     {
         // If too much time has elapsed, assume we should just wait until we have a new full packet
@@ -272,7 +282,7 @@ void DynamixelDevice::processInput( void )
             // Checksums match now see if it is for us...
             if ( ( mID == REG[ REG_ID ] || mID == 0xFE ) )
             {
-#ifdef USE_DEBUG_PINS 
+#ifdef DDV_USE_DEBUG_PINS 
               digitalWrite(LED_PIN, !digitalRead(LED_PIN));
 #endif 
               processInputPacket( mInstruction, mData, mLength - 2 );
@@ -299,8 +309,8 @@ void DynamixelDevice::processInput( void )
 //------------------------------------------------------------------------------
 void DynamixelDevice::processInputPacket( byte instruction, byte* data, int len )
 {
-#ifdef USE_DEBUG_PINS 
-  digitalWrite(4, !digitalRead(4));
+#ifdef DDV_USE_DEBUG_PINS 
+  digitalWrite(DDV_DEBUG_PIN2, !digitalRead(DDV_DEBUG_PIN2));
 #endif  
   switch ( instruction )
   {
@@ -334,7 +344,7 @@ void DynamixelDevice::processInputPacket( byte instruction, byte* data, int len 
 
         for ( int i = 0; i < regWrites[regWriteCount].RegWriteLength; ++i )
         {
-          regWrites[regWriteCount].RegWriteData[ i ] = data[ i + 1 ];
+          RegWriteData[ i ] = data[ i + 1 ];
         }
         regWriteCount++;
       }
@@ -345,7 +355,7 @@ void DynamixelDevice::processInputPacket( byte instruction, byte* data, int len 
         {
         	for( int i = 0; i < regWriteCount; ++i )
         	{
-	          writeValues( regWrites[i].RegWriteAddress, regWrites[i].RegWriteLength, regWrites[i].RegWriteData );
+	          writeValues( regWrites[i].RegWriteAddress, regWrites[i].RegWriteLength, RegWriteData );
 	          postProcessRegisterWrite(regWrites[i].RegWriteAddress, regWrites[i].RegWriteLength);
         	}
         	regWriteCount = 0;
@@ -353,10 +363,7 @@ void DynamixelDevice::processInputPacket( byte instruction, byte* data, int len 
       }
       break;
     case RESET:
-      {
-        if (mID == 0xFE) return;
-        //asm volatile ("  jmp 0");
-      }
+      processReset();   
       break;
     case SYNC_WRITE:
       {
@@ -408,6 +415,16 @@ void DynamixelDevice::preProcessRegisterRead(int index __attribute__((unused)), 
 }
 
 //------------------------------------------------------------------------------
+// DynamixelDevice::processReset - Handle the reset message. 
+//------------------------------------------------------------------------------
+void DynamixelDevice::processReset()
+{
+    // Try rebooting the processor 
+    //if (mID != 0xFE)
+        //asm volatile ("  jmp 0");
+}
+
+//------------------------------------------------------------------------------
 // DynamixelDevice::lookAtOtherDevicePackets - Look at packets that are not
 //  meant for us.  Allows subclasses to do things like turn on Neo pixels 
 //  for things that are happening. 
@@ -425,43 +442,52 @@ void DynamixelDevice::lookAtOtherDevicePackets(int mID __attribute__((unused)),
 //------------------------------------------------------------------------------
 void DynamixelDevice::setRX()
 {
+  // There are times when the Trinket stops responding, so maybe always do the underlying code to 
+  // to make sure that we are in RX Mode.    
   // Only do this if we are not in this mode now
-  if (serial_in_input_mode_)
-    return;
-  serial_in_input_mode_ = true;
+  if (!diode_)
+  {
+    if (!serial_in_input_mode_)
+    {
+      // Wait until all TX bytes have been output - Only do this when think we should
+      pstream_->flush();
 
-  // Wait until all TX bytes have been output
-  pstream_->flush();
-
-  flushInput();  // remove any garbage in the input queue
-
+      flushInput();  // remove any garbage in the input queue
+    }
+    
 #if defined(__MK20DX256__)  || defined(__MKL26Z64__)
-  // Teensy 3.1
-  if (pstream_ == (Stream*)&Serial1)
+    // Teensy 3.1
+    if (pstream_ == (Stream*)&Serial1)
       UART0_C3 &= ~UART_C3_TXDIR;
-  if (pstream_ == (Stream*)&Serial2)
+    if (pstream_ == (Stream*)&Serial2)
       UART1_C3 &= ~UART_C3_TXDIR;
-  if (pstream_ == (Stream*)&Serial3)
+    if (pstream_ == (Stream*)&Serial3)
       UART2_C3 &= ~UART_C3_TXDIR;
 #else
-  if (pstream_ == (Stream*)&Serial)
-    UCSR0B = ((1 << RXCIE0) | (1 << RXEN0));
+    if (pstream_ == (Stream*)&Serial)
+      UCSR0B = ((1 << RXCIE0) | (1 << RXEN0));
 #ifdef UCSR1B
-  if (pstream_ == (Stream*)&Serial1)
-    UCSR1B = ((1 << RXCIE1) | (1 << RXEN1));
+    if (pstream_ == (Stream*)&Serial1)
+      UCSR1B = ((1 << RXCIE1) | (1 << RXEN1));
 #endif
 #ifdef UCSR2B
-  if (pstream_ == (Stream*)&Serial2)
-    UCSR2B = ((1 << RXCIE2) | (1 << RXEN2);
+    if (pstream_ == (Stream*)&Serial2)
+      UCSR2B = ((1 << RXCIE2) | (1 << RXEN2);
 #endif
 #ifdef UCSR3B
-  if (pstream_ == (Stream*)&Serial3)
-    UCSR3B = ((1 << RXCIE3) | (1 << RXEN3));
+    if (pstream_ == (Stream*)&Serial3)
+      UCSR3B = ((1 << RXCIE3) | (1 << RXEN3));
 #endif
 #endif
-#ifdef USE_DEBUG_PINS 
-  digitalWrite(3, LOW);
+  }
+
+  if (!serial_in_input_mode_)
+  {
+    serial_in_input_mode_ = true;
+#ifdef DDV_USE_DEBUG_PINS 
+    digitalWrite(DDV_DEBUG_PIN1, LOW);
 #endif
+  }
 }
 
 
@@ -470,37 +496,41 @@ void DynamixelDevice::setRX()
 //------------------------------------------------------------------------------
 void DynamixelDevice::setTX()
 {
+
   // Only do this if we are not in this mode now
   if (!serial_in_input_mode_)
     return;
   serial_in_input_mode_ = false;
 
+  if (!diode_)
+  {
 #if defined(__MK20DX256__)  || defined(__MKL26Z64__)
-  // Teensy 3.1, 3.2, LC
-  if (pstream_ == (Stream*)&Serial1)
+    // Teensy 3.1, 3.2, LC
+    if (pstream_ == (Stream*)&Serial1)
       UART0_C3 |= UART_C3_TXDIR;
-  if (pstream_ == (Stream*)&Serial2)
+    if (pstream_ == (Stream*)&Serial2)
       UART1_C3 |= UART_C3_TXDIR;
-  if (pstream_ == (Stream*)&Serial3)
+    if (pstream_ == (Stream*)&Serial3)
       UART2_C3 |= UART_C3_TXDIR;
 #else
-  if (pstream_ == (Stream*)&Serial)
-    UCSR0B = /*(1 << UDRIE1) |*/ (1 << TXEN0);
+    if (pstream_ == (Stream*)&Serial)
+      UCSR0B = /*(1 << UDRIE1) |*/ (1 << TXEN0);
 #ifdef UCSR1B
-  if (pstream_ == (Stream*)&Serial1)
-    UCSR1B = /*(1 << UDRIE1) |*/ (1 << TXEN1);
+    if (pstream_ == (Stream*)&Serial1)
+      UCSR1B = /*(1 << UDRIE1) |*/ (1 << TXEN1);
 #endif
 #ifdef UCSR2B
-  if (pstream_ == (Stream*)&Serial2)
-    UCSR2B = /*(1 << UDRIE3) |*/ (1 << TXEN2);
+    if (pstream_ == (Stream*)&Serial2)
+      UCSR2B = /*(1 << UDRIE3) |*/ (1 << TXEN2);
 #endif
 #ifdef UCSR3B
-  if (pstream_ == (Stream*)&Serial3)
-    UCSR3B =  /*(1 << UDRIE3) |*/ (1 << TXEN3);
+    if (pstream_ == (Stream*)&Serial3)
+      UCSR3B =  /*(1 << UDRIE3) |*/ (1 << TXEN3);
 #endif
 #endif
-#ifdef USE_DEBUG_PINS 
-  digitalWrite(3, HIGH);
+  }
+#ifdef DDV_USE_DEBUG_PINS 
+  digitalWrite(DDV_DEBUG_PIN1, HIGH);
 #endif
 }
 
@@ -567,9 +597,9 @@ void DynamixelDevice::transmitMessage( byte err, byte* data, byte len )
   txmsg[ 5 + len ] = checksum;
 
 	//delayMicroseconds( REG[ REG_DELAY ] * 2 );
-  if(!Diode)setTX();  // Set the Serial port into output mode
+  setTX();  // Set the Serial port into output mode
   pstream_->write( txmsg, 5 + len + 1 );
-  if(!Diode)setRX();  // restore
+  setRX();  // restore
 }
 
 
